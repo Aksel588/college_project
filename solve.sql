@@ -1,0 +1,1 @@
+select concat(students.first_name , " " , students.last_name) as student_name, AVG(grades.grade) as stud_avg
