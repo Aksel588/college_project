@@ -106,31 +106,95 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
   }
 });
 
-// ----------------- PRODUCTS ROUTES ----------------- //
+// ----------------- PRODUCTS ROUTES (WITH FULL FILTERS) ----------------- //
 
-// Get all products (with optional filter)
+// Get all products (with comprehensive multi-dimensional filters)
 app.get('/api/products', async (req, res) => {
-  const { category, search, sort } = req.query;
+  const {
+    category,
+    sub_category,
+    search,
+    minPrice,
+    maxPrice,
+    size,
+    color,
+    tag,
+    onSale,
+    featured,
+    sort
+  } = req.query;
+
   try {
     let sql = 'SELECT * FROM shop_products WHERE 1=1';
     const params = [];
 
+    // Category Filter
     if (category && category !== 'All') {
       sql += ' AND (category = ? OR sub_category = ?)';
       params.push(category, category);
     }
 
-    if (search) {
-      sql += ' AND (name LIKE ? OR description LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+    // Sub-Category Filter
+    if (sub_category && sub_category !== 'All') {
+      sql += ' AND sub_category = ?';
+      params.push(sub_category);
     }
 
+    // Search Filter (name, description, tag)
+    if (search && search.trim()) {
+      sql += ' AND (name LIKE ? OR description LIKE ? OR tag LIKE ?)';
+      params.push(`%${search.trim()}%`, `%${search.trim()}%`, `%${search.trim()}%`);
+    }
+
+    // Price Bounds Filter
+    if (minPrice && !isNaN(Number(minPrice))) {
+      sql += ' AND price >= ?';
+      params.push(Number(minPrice));
+    }
+    if (maxPrice && !isNaN(Number(maxPrice))) {
+      sql += ' AND price <= ?';
+      params.push(Number(maxPrice));
+    }
+
+    // Size Filter (JSON array match via LIKE)
+    if (size) {
+      sql += ' AND sizes LIKE ?';
+      params.push(`%"${size}"%`);
+    }
+
+    // Color Filter (JSON array match via LIKE)
+    if (color) {
+      sql += ' AND colors LIKE ?';
+      params.push(`%${color}%`);
+    }
+
+    // Badge / Tag Filter
+    if (tag && tag !== 'All') {
+      sql += ' AND tag = ?';
+      params.push(tag);
+    }
+
+    // On-Sale Discount Filter
+    if (onSale === 'true' || onSale === true || onSale === '1') {
+      sql += ' AND original_price IS NOT NULL AND original_price > price';
+    }
+
+    // Featured Filter
+    if (featured === 'true' || featured === true || featured === '1') {
+      sql += ' AND featured = 1';
+    }
+
+    // Sorting Options
     if (sort === 'price_asc') {
       sql += ' ORDER BY price ASC';
     } else if (sort === 'price_desc') {
       sql += ' ORDER BY price DESC';
+    } else if (sort === 'discount_desc') {
+      sql += ' ORDER BY (original_price - price) DESC';
+    } else if (sort === 'name_asc') {
+      sql += ' ORDER BY name ASC';
     } else {
-      sql += ' ORDER BY id DESC';
+      sql += ' ORDER BY featured DESC, id DESC';
     }
 
     const [rows] = await pool.query(sql, params);
@@ -232,12 +296,77 @@ app.get('/api/orders/my-orders', authenticateToken, async (req, res) => {
   }
 });
 
-// ----------------- PHASE 1: ADMIN ROUTES ----------------- //
+// ----------------- FULL ADMIN PANEL ROUTES ----------------- //
 
-// Admin: Get all orders across the store
-app.get('/api/admin/orders', async (req, res) => {
+// Admin: Analytics & Overview Stats
+app.get('/api/admin/stats', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM shop_orders ORDER BY id DESC');
+    // 1. Total Revenue
+    const [revenueRows] = await pool.query(
+      "SELECT COALESCE(SUM(total_amount), 0) AS total_revenue FROM shop_orders WHERE status != 'cancelled'"
+    );
+    const totalRevenue = Number(revenueRows[0].total_revenue) || 0;
+
+    // 2. Total Orders
+    const [ordersCountRows] = await pool.query('SELECT COUNT(*) AS total_orders FROM shop_orders');
+    const totalOrders = ordersCountRows[0].total_orders;
+
+    // 3. Total Products & Out/Low-of-stock
+    const [prodCountRows] = await pool.query('SELECT COUNT(*) AS total_products FROM shop_products');
+    const totalProducts = prodCountRows[0].total_products;
+
+    const [lowStockRows] = await pool.query('SELECT COUNT(*) AS low_stock FROM shop_products WHERE stock_quantity <= 25');
+    const lowStockCount = lowStockRows[0].low_stock;
+
+    // 4. Total Users
+    const [userCountRows] = await pool.query("SELECT COUNT(*) AS total_users FROM shop_users WHERE role = 'customer'");
+    const totalUsers = userCountRows[0].total_users;
+
+    // 5. Orders by Status Breakdown
+    const [statusRows] = await pool.query(
+      'SELECT status, COUNT(*) as count FROM shop_orders GROUP BY status'
+    );
+    const statusMap = { paid: 0, processing: 0, shipped: 0, delivered: 0, cancelled: 0 };
+    statusRows.forEach(r => { statusMap[r.status] = r.count; });
+
+    // 6. Average Order Value
+    const aov = totalOrders > 0 ? (totalRevenue / totalOrders).toFixed(2) : 0;
+
+    res.json({
+      totalRevenue,
+      totalOrders,
+      totalProducts,
+      totalUsers,
+      lowStockCount,
+      averageOrderValue: Number(aov),
+      statusBreakdown: statusMap
+    });
+  } catch (error) {
+    console.error('Admin stats error:', error);
+    res.status(500).json({ error: 'Failed to generate store analytics' });
+  }
+});
+
+// Admin: Get all orders across the store (with status & search filter)
+app.get('/api/admin/orders', async (req, res) => {
+  const { status, search } = req.query;
+  try {
+    let sql = 'SELECT * FROM shop_orders WHERE 1=1';
+    const params = [];
+
+    if (status && status !== 'all') {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
+
+    if (search && search.trim()) {
+      sql += ' AND (order_number LIKE ? OR customer_name LIKE ? OR email LIKE ?)';
+      params.push(`%${search.trim()}%`, `%${search.trim()}%`, `%${search.trim()}%`);
+    }
+
+    sql += ' ORDER BY id DESC';
+
+    const [rows] = await pool.query(sql, params);
     const orders = rows.map(o => ({
       ...o,
       items: typeof o.items === 'string' ? JSON.parse(o.items || '[]') : o.items || []
@@ -251,7 +380,7 @@ app.get('/api/admin/orders', async (req, res) => {
 // Admin: Update order fulfillment status
 app.patch('/api/admin/orders/:id/status', async (req, res) => {
   const { status } = req.body;
-  const valid = ['paid', 'processing', 'shipped', 'delivered'];
+  const valid = ['paid', 'processing', 'shipped', 'delivered', 'cancelled'];
   if (!valid.includes(status)) {
     return res.status(400).json({ error: 'Invalid order status' });
   }
@@ -264,17 +393,78 @@ app.patch('/api/admin/orders/:id/status', async (req, res) => {
   }
 });
 
+// Admin: Delete order
+app.delete('/api/admin/orders/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM shop_orders WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Order record deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete order' });
+  }
+});
+
+// Admin: Get all products (with admin details)
+app.get('/api/admin/products', async (req, res) => {
+  const { search, category } = req.query;
+  try {
+    let sql = 'SELECT * FROM shop_products WHERE 1=1';
+    const params = [];
+
+    if (category && category !== 'All') {
+      sql += ' AND (category = ? OR sub_category = ?)';
+      params.push(category, category);
+    }
+
+    if (search && search.trim()) {
+      sql += ' AND (name LIKE ? OR description LIKE ? OR tag LIKE ?)';
+      params.push(`%${search.trim()}%`, `%${search.trim()}%`, `%${search.trim()}%`);
+    }
+
+    sql += ' ORDER BY id DESC';
+
+    const [rows] = await pool.query(sql, params);
+    const products = rows.map(item => ({
+      ...item,
+      gallery: typeof item.gallery === 'string' ? JSON.parse(item.gallery || '[]') : item.gallery || [],
+      sizes: typeof item.sizes === 'string' ? JSON.parse(item.sizes || '[]') : item.sizes || [],
+      colors: typeof item.colors === 'string' ? JSON.parse(item.colors || '[]') : item.colors || []
+    }));
+    res.json(products);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch admin products' });
+  }
+});
+
 // Admin: Add new product
 app.post('/api/admin/products', async (req, res) => {
-  const { name, category, sub_category, price, original_price, tag, image, description, sizes, colors } = req.body;
+  const {
+    name,
+    category,
+    sub_category,
+    price,
+    original_price,
+    tag,
+    image,
+    gallery,
+    description,
+    sizes,
+    colors,
+    featured,
+    stock_quantity
+  } = req.body;
+
   if (!name || !category || !price || !image) {
     return res.status(400).json({ error: 'Missing required product fields' });
   }
 
   try {
+    const galleryArr = Array.isArray(gallery) && gallery.length > 0 ? gallery : [image];
+    const sizesArr = Array.isArray(sizes) ? sizes : ['S', 'M', 'L', 'XL'];
+    const colorsArr = Array.isArray(colors) ? colors : ['Black', 'White'];
+
     const [result] = await pool.query(
-      `INSERT INTO shop_products (name, category, sub_category, price, original_price, tag, image, gallery, description, sizes, colors, featured)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO shop_products (name, category, sub_category, price, original_price, tag, image, gallery, description, sizes, colors, featured, stock_quantity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         category,
@@ -283,17 +473,85 @@ app.post('/api/admin/products', async (req, res) => {
         original_price || null,
         tag || 'NEW DROP',
         image,
-        JSON.stringify([image]),
+        JSON.stringify(galleryArr),
         description || '',
-        JSON.stringify(sizes || ['S', 'M', 'L', 'XL']),
-        JSON.stringify(colors || ['Black', 'White']),
-        true
+        JSON.stringify(sizesArr),
+        JSON.stringify(colorsArr),
+        featured ? 1 : 0,
+        stock_quantity || 50
       ]
     );
 
     res.status(201).json({ message: 'Product added successfully', productId: result.insertId });
   } catch (error) {
     res.status(500).json({ error: 'Failed to add product: ' + error.message });
+  }
+});
+
+// Admin: Update existing product (FULL EDIT)
+app.put('/api/admin/products/:id', async (req, res) => {
+  const {
+    name,
+    category,
+    sub_category,
+    price,
+    original_price,
+    tag,
+    image,
+    gallery,
+    description,
+    sizes,
+    colors,
+    featured,
+    stock_quantity
+  } = req.body;
+
+  if (!name || !category || !price || !image) {
+    return res.status(400).json({ error: 'Missing required product fields' });
+  }
+
+  try {
+    const galleryArr = Array.isArray(gallery) && gallery.length > 0 ? gallery : [image];
+    const sizesArr = Array.isArray(sizes) ? sizes : ['S', 'M', 'L', 'XL'];
+    const colorsArr = Array.isArray(colors) ? colors : ['Black', 'White'];
+
+    await pool.query(
+      `UPDATE shop_products SET 
+        name = ?, category = ?, sub_category = ?, price = ?, original_price = ?,
+        tag = ?, image = ?, gallery = ?, description = ?, sizes = ?, colors = ?,
+        featured = ?, stock_quantity = ?
+       WHERE id = ?`,
+      [
+        name,
+        category,
+        sub_category || category,
+        price,
+        original_price || null,
+        tag || '',
+        image,
+        JSON.stringify(galleryArr),
+        description || '',
+        JSON.stringify(sizesArr),
+        JSON.stringify(colorsArr),
+        featured ? 1 : 0,
+        stock_quantity || 50,
+        req.params.id
+      ]
+    );
+
+    res.json({ message: 'Product updated successfully in MySQL' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update product: ' + error.message });
+  }
+});
+
+// Admin: Toggle featured status
+app.patch('/api/admin/products/:id/toggle-featured', async (req, res) => {
+  try {
+    await pool.query('UPDATE shop_products SET featured = NOT featured WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Featured status updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to toggle featured status' });
   }
 });
 
@@ -307,7 +565,127 @@ app.delete('/api/admin/products/:id', async (req, res) => {
   }
 });
 
-// ----------------- PHASE 2: WISHLIST & COUPONS ----------------- //
+// Admin: Get all registered customers
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        u.id, 
+        u.name, 
+        u.email, 
+        u.role, 
+        u.created_at,
+        COUNT(o.id) AS total_orders,
+        COALESCE(SUM(o.total_amount), 0) AS total_spent
+      FROM shop_users u
+      LEFT JOIN shop_orders o ON u.id = o.user_id AND o.status != 'cancelled'
+      GROUP BY u.id
+      ORDER BY u.id DESC
+    `);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch customer directory' });
+  }
+});
+
+// Admin: Update user role (promote to admin or customer)
+app.patch('/api/admin/users/:id/role', async (req, res) => {
+  const { role } = req.body;
+  if (!['customer', 'admin'].includes(role)) {
+    return res.status(400).json({ error: 'Invalid user role' });
+  }
+
+  try {
+    await pool.query('UPDATE shop_users SET role = ? WHERE id = ?', [role, req.params.id]);
+    res.json({ message: `User role updated to ${role}` });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to change user role' });
+  }
+});
+
+// Admin: Delete user
+app.delete('/api/admin/users/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM shop_users WHERE id = ?', [req.params.id]);
+    res.json({ message: 'User account removed' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
+// Admin: Coupons management
+app.get('/api/admin/coupons', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM shop_coupons ORDER BY id DESC');
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch coupons' });
+  }
+});
+
+app.post('/api/admin/coupons', async (req, res) => {
+  const { code, discount_percent, min_spend, active } = req.body;
+  if (!code || !discount_percent) {
+    return res.status(400).json({ error: 'Code and discount percentage are required' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO shop_coupons (code, discount_percent, min_spend, active) VALUES (?, ?, ?, ?)',
+      [code.trim().toUpperCase(), Number(discount_percent), Number(min_spend || 0), active !== false ? 1 : 0]
+    );
+    res.status(201).json({ message: 'Coupon created successfully', couponId: result.insertId });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create coupon: ' + error.message });
+  }
+});
+
+app.patch('/api/admin/coupons/:id/toggle', async (req, res) => {
+  try {
+    await pool.query('UPDATE shop_coupons SET active = NOT active WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Coupon status toggled' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to toggle coupon' });
+  }
+});
+
+app.delete('/api/admin/coupons/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM shop_coupons WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Coupon deleted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete coupon' });
+  }
+});
+
+// Admin: Reviews management
+app.get('/api/admin/reviews', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        r.*,
+        p.name AS product_name,
+        p.image AS product_image
+      FROM shop_reviews r
+      LEFT JOIN shop_products p ON r.product_id = p.id
+      ORDER BY r.id DESC
+    `);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch reviews' });
+  }
+});
+
+app.delete('/api/admin/reviews/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM shop_reviews WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Review removed' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete review' });
+  }
+});
+
+// ----------------- WISHLIST & COUPONS ----------------- //
 
 // Get User Wishlist
 app.get('/api/wishlist', authenticateToken, async (req, res) => {
@@ -387,7 +765,7 @@ app.post('/api/coupons/apply', async (req, res) => {
   }
 });
 
-// ----------------- PHASE 3: REVIEWS & RATINGS ----------------- //
+// ----------------- REVIEWS & RATINGS ----------------- //
 
 // Get Reviews for Product
 app.get('/api/products/:id/reviews', async (req, res) => {

@@ -9,6 +9,7 @@ import AuthModal from './components/AuthModal';
 import OrdersModal from './components/OrdersModal';
 import AdminModal from './components/AdminModal';
 import WishlistModal from './components/WishlistModal';
+import FilterBar from './components/FilterBar';
 import Footer from './components/Footer';
 import { api } from './api';
 import { SlidersHorizontal, ArrowUpDown, Sparkles } from 'lucide-react';
@@ -20,6 +21,35 @@ export default function App() {
   const [activeCategory, setActiveCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('newest');
+
+  // Multi-dimensional Filters State
+  const [filters, setFilters] = useState({
+    sub_category: 'All',
+    minPrice: '',
+    maxPrice: '',
+    size: 'All',
+    color: 'All',
+    tag: 'All',
+    onSale: false
+  });
+
+  const handleFilterChange = (key, value) => {
+    setFilters(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleResetFilters = () => {
+    setFilters({
+      sub_category: 'All',
+      minPrice: '',
+      maxPrice: '',
+      size: 'All',
+      color: 'All',
+      tag: 'All',
+      onSale: false
+    });
+    setSearchQuery('');
+    setActiveCategory('All');
+  };
 
   // Cart State (Persisted in localStorage)
   const [cartItems, setCartItems] = useState(() => {
@@ -67,14 +97,22 @@ export default function App() {
     localStorage.setItem('cart_items', JSON.stringify(cartItems));
   }, [cartItems]);
 
-  // Fetch Products
+  // Fetch Products with complete filter matrix
   const loadProducts = async () => {
     try {
       setLoading(true);
-      const params = {};
-      if (activeCategory !== 'All') params.category = activeCategory;
-      if (searchQuery.trim()) params.search = searchQuery.trim();
-      if (sortBy) params.sort = sortBy;
+      const params = {
+        category: activeCategory !== 'All' ? activeCategory : undefined,
+        sub_category: filters.sub_category !== 'All' ? filters.sub_category : undefined,
+        search: searchQuery.trim() || undefined,
+        minPrice: filters.minPrice || undefined,
+        maxPrice: filters.maxPrice || undefined,
+        size: filters.size !== 'All' ? filters.size : undefined,
+        color: filters.color !== 'All' ? filters.color : undefined,
+        tag: filters.tag !== 'All' ? filters.tag : undefined,
+        onSale: filters.onSale ? true : undefined,
+        sort: sortBy
+      };
 
       const data = await api.getProducts(params);
       setProducts(data);
@@ -88,9 +126,9 @@ export default function App() {
   useEffect(() => {
     const timer = setTimeout(() => {
       loadProducts();
-    }, 250);
+    }, 200);
     return () => clearTimeout(timer);
-  }, [activeCategory, searchQuery, sortBy]);
+  }, [activeCategory, searchQuery, sortBy, filters]);
 
   // Load Wishlist if user authenticated
   useEffect(() => {
@@ -159,7 +197,7 @@ export default function App() {
     );
   };
 
-  // Phase 2: Wishlist Toggle
+  // Wishlist Toggle
   const handleToggleWishlist = async (productId) => {
     if (!authToken) {
       setIsAuthOpen(true);
@@ -264,10 +302,20 @@ export default function App() {
                 <option value="newest">Featured & Newest</option>
                 <option value="price_asc">Price: Low to High</option>
                 <option value="price_desc">Price: High to Low</option>
+                <option value="discount_desc">Biggest Discount</option>
+                <option value="name_asc">Alphabetical (A - Z)</option>
               </select>
             </div>
           </div>
         </div>
+
+        {/* Full Filter System */}
+        <FilterBar 
+          filters={filters}
+          onFilterChange={handleFilterChange}
+          onResetFilters={handleResetFilters}
+          totalResults={products.length}
+        />
 
         {/* Product Grid */}
         {loading ? (
@@ -277,13 +325,13 @@ export default function App() {
           </div>
         ) : products.length === 0 ? (
           <div className="catalog-empty">
-            <p className="empty-title">NO ITEMS MATCHED YOUR SEARCH</p>
-            <p className="empty-desc">Try resetting your filter or searching for another keyword.</p>
+            <p className="empty-title">NO ITEMS MATCHED YOUR ACTIVE FILTERS</p>
+            <p className="empty-desc">Try resetting your filter parameters or searching for another keyword.</p>
             <button 
               className="solid-btn"
-              onClick={() => { setActiveCategory('All'); setSearchQuery(''); }}
+              onClick={handleResetFilters}
             >
-              RESET FILTERS
+              RESET ALL FILTERS
             </button>
           </div>
         ) : (
@@ -342,14 +390,14 @@ export default function App() {
         token={authToken}
       />
 
-      {/* Phase 1: Store Admin */}
+      {/* Store Admin Portal */}
       <AdminModal
         isOpen={isAdminOpen}
         onClose={() => setIsAdminOpen(false)}
         onProductCreated={loadProducts}
       />
 
-      {/* Phase 2: Wishlist */}
+      {/* Wishlist */}
       <WishlistModal
         isOpen={isWishlistOpen}
         onClose={() => setIsWishlistOpen(false)}
